@@ -310,6 +310,7 @@ def run(args):
         max_grad_norm=args.optimizer.max_grad_norm,
         save_dpath=save_dpath,
         save_model_every=args.train.save_model_every,
+        save_results_every=args.train.save_results_every,
         wandb_dpath=args.train.wandb_dpath,
         max_valid_size=args.train.max_valid_size,
         validate_every=args.train.validate_every,

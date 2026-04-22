@@ -31,6 +31,7 @@ train:
   log_every: 50
   validate_every: 1000
   save_model_every: 1000
+  save_results_every: 1000
   resume_ckpt: "no"
   save_root_dpath: "./checkpoints"
   enable_cache: True
