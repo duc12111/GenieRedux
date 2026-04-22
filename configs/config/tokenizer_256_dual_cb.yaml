@@ -38,4 +38,5 @@ train:
   resume_ckpt: "no"
 
 # Path to the pretrained big tokenizer checkpoint (strict=False load; small_vq is random-init).
-tokenizer_fpath: "checkpoints/genie_redux_guilded/tokenizer.pt"
+# Absolute path so the correct big tokenizer is always used regardless of cwd.
+tokenizer_fpath: "/home/stud/nguyenti/storage/user/GenieRedux/checkpoints/genie_redux_guilded/model-100000.pt"
