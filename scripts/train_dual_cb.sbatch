@@ -34,10 +34,17 @@ conda activate genie_redux
 cd /home/stud/nguyenti/storage/user/GenieRedux
 
 CB_SIZE="${CB_SIZE:-16}"
-N_ENVS="${N_ENVS:-5}"
+N_ENVS="${N_ENVS:-0}"            # 0 = all games (120 in retro_act_v0.0.0_g200_256)
 STEPS="${STEPS:-5000}"
 
-echo "=== Dual-codebook training: small_codebook_size=${CB_SIZE}, n_envs=${N_ENVS}, steps=${STEPS} ==="
+# Log-readable game-count tag: "all" when N_ENVS=0, else the number.
+if [ "${N_ENVS}" = "0" ]; then
+  GAMES_TAG="allgames"
+else
+  GAMES_TAG="${N_ENVS}games"
+fi
+
+echo "=== Dual-codebook training: small_codebook_size=${CB_SIZE}, n_envs=${N_ENVS} (${GAMES_TAG}), steps=${STEPS} ==="
 
 python train_genie_redux.py \
   config=tokenizer_256_dual_cb \
@@ -45,7 +52,7 @@ python train_genie_redux.py \
   train.n_envs="${N_ENVS}" \
   train.num_train_steps="${STEPS}" \
   train.sample_num_frames=7 \
-  train.wandb_name="dual_cb_train_cb${CB_SIZE}_${N_ENVS}games"
+  train.wandb_name="dual_cb_train_cb${CB_SIZE}_${GAMES_TAG}"
 
 echo "=== DONE ==="
 date

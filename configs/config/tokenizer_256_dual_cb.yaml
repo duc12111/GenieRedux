@@ -7,7 +7,8 @@
 #
 # Override small_codebook_size and n_envs from the CLI:
 #   python train_genie_redux.py config=tokenizer_256_dual_cb \
-#     tokenizer.small_codebook_size=16 train.n_envs=5
+#     tokenizer.small_codebook_size=16 train.n_envs=0
+# n_envs=0 means "all games" (120 envs in retro_act_v0.0.0_g200_256).
 
 defaults:
   - default
@@ -33,7 +34,7 @@ train:
   grad_accum: 4
   n_data_workers: 4
   n_total_samples: 50
-  n_envs: 5
+  n_envs: 0                    # 0 = all games (120 in this dataset)
   max_valid_size: 50
   resume_ckpt: "no"
 
