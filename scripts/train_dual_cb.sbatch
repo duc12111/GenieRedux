@@ -52,7 +52,15 @@ python train_genie_redux.py \
   train.n_envs="${N_ENVS}" \
   train.num_train_steps="${STEPS}" \
   train.sample_num_frames=7 \
+  train.validate_every=200 \
+  train.save_results_every=200 \
   train.wandb_name="dual_cb_train_cb${CB_SIZE}_${GAMES_TAG}"
+
+# Logging cadence:
+#   - train scalars (loss, vq loss, recon loss, lr): every 50 steps (default)
+#   - validation scalars (loss, FID, PSNR): every 200 steps
+#   - visual recon samples (wandb images + on-disk gifs): every 200 steps
+#   - model checkpoints: every 1000 steps (default; keeps disk use reasonable)
 
 echo "=== DONE ==="
 date
