@@ -3,6 +3,7 @@ import torch
 
 from models import (
     Dynamics,
+    DualCodebookTokenizer,
     GenieRedux,
     GenieReduxGuided,
     LatentActionModel,
@@ -12,23 +13,37 @@ from models import (
 
 
 def construct_model(config):
-    if config.model not in ["tokenizer", "genie_redux", "genie_redux_guided", "genie_redux_guided_pretrain"]:
+    if config.model not in [
+        "tokenizer",
+        "tokenizer_dual_cb",
+        "genie_redux",
+        "genie_redux_guided",
+        "genie_redux_guided_pretrain",
+    ]:
         raise ValueError(f"Unknown model: {config.model}")
 
-    tokenizer = Tokenizer(
+    _tokenizer_kwargs = dict(
         dim=config.tokenizer.dim,
         codebook_size=config.tokenizer.codebook_size,
         image_size=config.tokenizer.image_size,
         patch_size=config.tokenizer.patch_size,
         wandb_mode=config.train.wandb_mode,
-        temporal_patch_size=config.tokenizer.temporal_patch_size,  # temporal patch size
-        num_blocks=config.tokenizer.num_blocks,  # nb of blocks in st transformer
-        dim_head=config.tokenizer.dim_head,  # hidden size in transfo
-        heads=config.tokenizer.heads,  # nb of heads for multi head transfo
-        ff_mult=config.tokenizer.ff_mult,  # 32 * 64 = 2048 MLP size in transfo out
-        vq_loss_w=config.tokenizer.vq_loss_weight,  # commit loss weight
-        recon_loss_w=config.tokenizer.recons_loss_weight,  # reconstruction loss weight
+        temporal_patch_size=config.tokenizer.temporal_patch_size,
+        num_blocks=config.tokenizer.num_blocks,
+        dim_head=config.tokenizer.dim_head,
+        heads=config.tokenizer.heads,
+        ff_mult=config.tokenizer.ff_mult,
+        vq_loss_w=config.tokenizer.vq_loss_weight,
+        recon_loss_w=config.tokenizer.recons_loss_weight,
     )
+
+    if config.model == "tokenizer_dual_cb":
+        return DualCodebookTokenizer(
+            small_codebook_size=config.tokenizer.small_codebook_size,
+            **_tokenizer_kwargs,
+        )
+
+    tokenizer = Tokenizer(**_tokenizer_kwargs)
 
     if config.model == "tokenizer":
         return tokenizer

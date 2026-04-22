@@ -2,30 +2,25 @@
 # Edit at https://www.toptal.com/developers/gitignore?templates=visualstudiocode,python,jupyternotebooks
 
 
-datasets
-datasets/*
-data_generation/datasets
-data_generation/datasets/*
-data_generation/annotations/previews/*
-wandb
-wandb/*
-debug
-debug*/*
-evaluate
-evaluate/*
-evaluation*/*
-cache
-cache/*
+data/
+data_generation/datasets/
+data_generation/annotations/previews/
+data_generation/condaenv.*.requirements.txt
+data_generation/external/deep_rl_zoo/
+data_generation/external/agent57_checkpoints/
+datasets/
+download/
+wandb/
+debug*/
+evaluate/
+evaluation*/
+cache/
+reports/
 
-finetune_bs*
-finetune_bs*/*
-
-checkpoints*
-checkpoints*/*
-
-dummy*
+finetune_bs*/
+checkpoints*/
+dummy*/
 inference*/
-inference*/*
 
 ### JupyterNotebooks ###
 # gitignore template for Jupyter Notebooks

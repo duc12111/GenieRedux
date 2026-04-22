@@ -1,0 +1,12 @@
+# @package _global_
+# 256x256 resolution, single game - use when you have limited ROMs
+
+defaults:
+  - retro_act/g200_256
+  - _self_
+
+dname: g200_256_single
+
+connector:
+  game: [CoolSpot-Snes]
+  limit_games: 1

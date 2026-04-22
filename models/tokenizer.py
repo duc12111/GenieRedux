@@ -4,6 +4,7 @@ from einops import pack, rearrange, repeat, unpack
 from torch import nn
 
 from models.components import STViViT
+from models.components.vector_quantize import VectorQuantize
 
 # helpers
 
@@ -384,5 +385,177 @@ class Tokenizer(STViViT):
         if return_recons:
             returned_recon = recon_video
             return loss, returned_recon
+
+        return loss
+
+    def forward_dual_codebook(
+        self,
+        videos,
+        small_vq,
+        return_only_codebook_ids=False,
+        return_recons_only=False,
+    ):
+        """Forward pass using dual codebooks: self.vq (big, frozen) for frame 0,
+        small_vq for frames 1+.
+
+        Used by analysis scripts (small_vq passed as argument) and internally by
+        DualCodebookTokenizer.forward() (which passes self.small_vq).
+
+        Args:
+            videos: (B, C, T, H, W)
+            small_vq: VectorQuantize instance for frames 1+
+            return_only_codebook_ids: if True, return (B, pt, ph, pw) concatenated indices
+            return_recons_only: if True, return reconstructed video tensor
+
+        Returns:
+            indices (B, pt, ph, pw), or recon video, or (small_vq_loss, recon_loss)
+        """
+        assert videos is not None and videos.ndim == 5
+
+        b, c, f, *image_dims = videos.shape
+        h, w = self.patch_height_width  # spatial patch grid dims
+
+        # Embed patches
+        first_frame, rest_frames = videos[:, :, :1], videos[:, :, 1:]
+        first_frame_tokens = self.to_patch_emb_first_frame(first_frame)   # (B, 1, h, w, d)
+        rest_frames_tokens = self.to_patch_emb(rest_frames)               # (B, t_rest, h, w, d)
+        tokens = torch.cat((first_frame_tokens, rest_frames_tokens), dim=1)  # (B, t, h, w, d)
+
+        # Encode (output still (B, t, h, w, d))
+        tokens = self.encode(tokens)
+
+        # Split into frame-0 and rest
+        first_tokens = tokens[:, :1, :, :, :]   # (B, 1, h, w, d)
+        rest_tokens  = tokens[:, 1:, :, :, :]   # (B, t_rest, h, w, d)
+
+        # Flatten spatial+temporal for VQ
+        first_flat, ps_first = pack([first_tokens], "b * d")   # (B, h*w, d)
+        rest_flat,  ps_rest  = pack([rest_tokens],  "b * d")   # (B, t_rest*h*w, d)
+
+        # Quantize frame 0 with big VQ (self.vq)
+        first_q, first_indices, first_vq_loss = self.vq(first_flat)
+
+        # Quantize frames 1+ with small VQ
+        rest_q, rest_indices, small_vq_loss = small_vq(rest_flat)
+
+        if return_only_codebook_ids:
+            t_rest = (f - 1) // self.temporal_patch_size
+            (first_indices,) = unpack(first_indices, ps_first, "b *")
+            (rest_indices,)  = unpack(rest_indices,  ps_rest,  "b *")
+            first_indices = first_indices.reshape(b, 1,      h, w)
+            rest_indices  = rest_indices.reshape( b, t_rest, h, w)
+            return torch.cat([first_indices, rest_indices], dim=1)  # (B, pt, h, w)
+
+        # Reconstruct — combine quantized tokens back to (B, t, h, w, d) for decode
+        (first_q,) = unpack(first_q, ps_first, "b * d")
+        (rest_q,)  = unpack(rest_q,  ps_rest,  "b * d")
+        tokens_q = torch.cat([first_q, rest_q], dim=1)   # (B, t, h, w, d)
+        recon_video = self.decode(tokens_q)
+
+        if return_recons_only:
+            return recon_video
+
+        return small_vq_loss, recon_video
+
+
+class DualCodebookTokenizer(Tokenizer):
+    """Tokenizer that uses two separate VQ codebooks:
+    - self.vq  (big, 1024 codes): frozen after loading pretrained weights, handles frame 0
+    - self.small_vq (small, configurable): trained from scratch, handles frames 1+
+
+    The decoder and to_pixels layers are trained to adapt to the mixed quantisation.
+    Encoder, patch embeddings, and big VQ stay frozen.
+
+    Usage in training:
+        model = DualCodebookTokenizer(small_codebook_size=16, ...)
+        # load pretrained big tokenizer weights (strict=False, small_vq keys are ignored)
+        model.load_state_dict(big_ckpt, strict=False)
+        model.freeze_big_components()
+        # optimise only model.trainable_parameters()
+    """
+
+    def __init__(self, *, small_codebook_size=16, codebook_dim=32, **kwargs):
+        super().__init__(codebook_dim=codebook_dim, **kwargs)
+        self.small_vq = VectorQuantize(
+            dim=kwargs["dim"],
+            codebook_size=small_codebook_size,
+            learnable_codebook=True,
+            ema_update=False,
+            use_cosine_sim=True,
+            commitment_weight=0.25,
+            codebook_dim=codebook_dim,
+        )
+        self.config["small_codebook_size"] = small_codebook_size
+
+    def freeze_big_components(self):
+        """Freeze encoder, patch embeddings, spatial pos bias, and big VQ.
+
+        Call this after loading pretrained weights so only the decoder, to_pixels
+        layers, and small_vq receive gradient updates.
+        """
+        for module in (
+            self.to_patch_emb_first_frame,
+            self.to_patch_emb,
+            self.encoder,
+            self.vq,
+            self.spatial_rel_pos_bias,
+        ):
+            for p in module.parameters():
+                p.requires_grad_(False)
+
+    def trainable_parameters(self):
+        """Return only the parameters that should be optimised."""
+        return (
+            list(self.decoder.parameters())
+            + list(self.to_pixels_first_frame.parameters())
+            + list(self.to_pixels.parameters())
+            + list(self.small_vq.parameters())
+        )
+
+    def forward(
+        self,
+        videos=None,
+        mask=None,
+        return_recons=False,
+        return_recons_only=False,
+        return_only_codebook_ids=False,
+        accelerator_tracker=None,
+        step=0,
+        log_every=50,
+        **kwargs,
+    ):
+        assert videos is not None and videos.ndim == 5
+
+        if return_only_codebook_ids or return_recons_only:
+            return self.forward_dual_codebook(
+                videos,
+                self.small_vq,
+                return_only_codebook_ids=return_only_codebook_ids,
+                return_recons_only=return_recons_only,
+            )
+
+        small_vq_loss, recon_video = self.forward_dual_codebook(videos, self.small_vq)
+
+        b, c = videos.shape[:2]
+        if exists(mask):
+            recon_loss = F.mse_loss(videos, recon_video, reduction="none")
+            recon_loss = recon_loss[repeat(mask, "b t -> b c t", c=c)]
+            recon_loss = recon_loss.mean()
+        else:
+            recon_loss = F.mse_loss(videos, recon_video)
+
+        loss = self.vq_loss_w * small_vq_loss + self.recon_loss_w * recon_loss
+
+        if self.wandb_mode != "disabled" and step % log_every == 0:
+            log_wandb_all_losses(
+                accelerator_tracker,
+                small_vq_loss,
+                recon_loss,
+                step,
+                self.training,
+            )
+
+        if return_recons:
+            return loss, recon_video
 
         return loss

@@ -1,0 +1,41 @@
+# @package _global_
+# Dual-codebook tokenizer training config for 256-pixel games.
+#
+# Big VQ (1024 codes, loaded from tokenizer_fpath) is frozen on frame 0.
+# Small VQ (small_codebook_size codes) is trained from scratch on frames 1+.
+# Decoder + to_pixels layers are also trained to adapt to mixed quantisation.
+#
+# Override small_codebook_size and n_envs from the CLI:
+#   python train_genie_redux.py config=tokenizer_256_dual_cb \
+#     tokenizer.small_codebook_size=16 train.n_envs=5
+
+defaults:
+  - default
+  - /tokenizer/tokenizer.yaml
+  - _self_
+
+model: tokenizer_dual_cb
+
+tokenizer:
+  image_size: 256
+  patch_size: 8
+  codebook_size: 1024          # big VQ — must match the pretrained checkpoint
+  small_codebook_size: 16      # overridden by CLI: tokenizer.small_codebook_size=CB_SIZE
+
+train:
+  dataset_root_dpath: "data_generation/datasets"
+  dataset_name: "retro_act_v0.0.0_g200_256"
+  wandb_name: "dual_cb"
+  num_frames: 8                # 1 anchor + 7 motion frames (keep in sync with sample_num_frames+1)
+  sample_num_frames: 7
+  batch_size: 4
+  batch_size_val: 10
+  grad_accum: 4
+  n_data_workers: 4
+  n_total_samples: 50
+  n_envs: 5
+  max_valid_size: 50
+  resume_ckpt: "no"
+
+# Path to the pretrained big tokenizer checkpoint (strict=False load; small_vq is random-init).
+tokenizer_fpath: "checkpoints/genie_redux_guilded/tokenizer.pt"

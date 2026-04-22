@@ -154,6 +154,26 @@ def run(args):
                 )
             model.tokenizer.load_state_dict(tok_state["model"])
             del tok_state
+    elif getattr(args, "model", None) == "tokenizer_dual_cb":
+        # Dual-codebook training: load pretrained big tokenizer (strict=False so
+        # small_vq keys are safely ignored), then freeze the big components.
+        if getattr(args, "tokenizer_fpath", None):
+            if not os.path.exists(args.tokenizer_fpath):
+                raise FileNotFoundError(
+                    f"Tokenizer checkpoint not found at '{args.tokenizer_fpath}'."
+                )
+            tok_state = torch.load(args.tokenizer_fpath, map_location="cpu")
+            missing, unexpected = model.load_state_dict(tok_state["model"], strict=False)
+            del tok_state
+            small_vq_missing = [k for k in missing if k.startswith("small_vq.")]
+            other_missing = [k for k in missing if not k.startswith("small_vq.")]
+            if other_missing:
+                print(f"Warning: unexpected missing keys when loading big tokenizer: {other_missing}")
+            if small_vq_missing:
+                print(f"small_vq keys initialised from scratch ({len(small_vq_missing)} tensors).")
+        model.freeze_big_components()
+        print("DualCodebookTokenizer: encoder + patch embs + big VQ frozen.")
+
     else:
         # Tokenizer-only training: do not use model_fpath; optional tokenizer_fpath only
         if getattr(args, "tokenizer_fpath", None):
