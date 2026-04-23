@@ -38,6 +38,7 @@ N_ENVS="${N_ENVS:-0}"            # 0 = all games (120 in retro_act_v0.0.0_g200_2
 STEPS="${STEPS:-5000}"
 LAMBDA_INV="${LAMBDA_INV:-0}"    # appearance-invariance aux weight (B1a)
 LAMBDA_FLOW="${LAMBDA_FLOW:-0}"  # optical-flow aux weight (B1b, deferred)
+DELTA_REF="${DELTA_REF:-none}"   # "none" / "anchor" / "rolling" — small-VQ input feature-delta
 
 # Log-readable game-count tag: "all" when N_ENVS=0, else the number.
 if [ "${N_ENVS}" = "0" ]; then
@@ -51,6 +52,7 @@ echo "=== Dual-codebook training: small_codebook_size=${CB_SIZE}, n_envs=${N_ENV
 python train_genie_redux.py \
   config=tokenizer_256_dual_cb \
   tokenizer.small_codebook_size="${CB_SIZE}" \
+  tokenizer.delta_ref="${DELTA_REF}" \
   train.n_envs="${N_ENVS}" \
   train.num_train_steps="${STEPS}" \
   train.lambda_inv="${LAMBDA_INV}" \
@@ -58,7 +60,7 @@ python train_genie_redux.py \
   train.sample_num_frames=7 \
   train.validate_every=500 \
   train.save_results_every=500 \
-  train.wandb_name="dual_cb_train_cb${CB_SIZE}_${GAMES_TAG}_inv${LAMBDA_INV}_flow${LAMBDA_FLOW}"
+  train.wandb_name="dual_cb_train_cb${CB_SIZE}_${GAMES_TAG}_inv${LAMBDA_INV}_flow${LAMBDA_FLOW}_delta${DELTA_REF}"
 
 # Logging cadence:
 #   - train scalars (loss, vq loss, recon loss, lr): every 50 steps (default)

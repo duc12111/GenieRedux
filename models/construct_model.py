@@ -40,6 +40,7 @@ def construct_model(config):
     if config.model == "tokenizer_dual_cb":
         return DualCodebookTokenizer(
             small_codebook_size=config.tokenizer.small_codebook_size,
+            delta_ref=getattr(config.tokenizer, "delta_ref", "none"),
             **_tokenizer_kwargs,
         )
 

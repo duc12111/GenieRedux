@@ -428,6 +428,27 @@ class Tokenizer(STViViT):
         first_tokens = tokens[:, :1, :, :, :]   # (B, 1, h, w, d)
         rest_tokens  = tokens[:, 1:, :, :, :]   # (B, t_rest, h, w, d)
 
+        # Optional delta-reference: subtract a reference from rest features
+        # before quantisation so the small VQ's input is motion-only by
+        # construction. The reference is added back before decoding so the
+        # decoder sees full features.
+        delta_ref = getattr(self, "delta_ref", "none")
+        if delta_ref == "anchor":
+            # subtract frame-0 features from every motion frame
+            rest_reference = first_tokens.expand_as(rest_tokens)
+            rest_tokens = rest_tokens - rest_reference
+        elif delta_ref == "rolling":
+            # subtract previous frame's features: frame t's ref is frame t-1
+            # (for t_rest frames indexed 0..t_rest-1, ref is the preceding
+            #  frame; for the first rest frame, its ref is frame 0)
+            prev_tokens = torch.cat(
+                (first_tokens, rest_tokens[:, :-1, :, :, :]), dim=1
+            )  # (B, t_rest, h, w, d) — ref_t = original rest_token at t-1 or first
+            rest_reference = prev_tokens
+            rest_tokens = rest_tokens - rest_reference
+        else:
+            rest_reference = None  # no-op; small_vq quantises raw features
+
         # Flatten spatial+temporal for VQ
         first_flat, ps_first = pack([first_tokens], "b * d")   # (B, h*w, d)
         rest_flat,  ps_rest  = pack([rest_tokens],  "b * d")   # (B, t_rest*h*w, d)
@@ -449,6 +470,11 @@ class Tokenizer(STViViT):
         # Reconstruct — combine quantized tokens back to (B, t, h, w, d) for decode
         (first_q,) = unpack(first_q, ps_first, "b * d")
         (rest_q,)  = unpack(rest_q,  ps_rest,  "b * d")
+        # If delta-mode, rest_q now holds quantised DELTAS. Add the reference
+        # back so the decoder sees full features (delta + reference = estimated
+        # original features, up to quantisation error on the delta).
+        if rest_reference is not None:
+            rest_q = rest_q + rest_reference
         tokens_q = torch.cat([first_q, rest_q], dim=1)   # (B, t, h, w, d)
         recon_video = self.decode(tokens_q)
 
@@ -474,7 +500,8 @@ class DualCodebookTokenizer(Tokenizer):
         # optimise only model.trainable_parameters()
     """
 
-    def __init__(self, *, small_codebook_size=16, codebook_dim=32, **kwargs):
+    def __init__(self, *, small_codebook_size=16, codebook_dim=32,
+                 delta_ref: str = "none", **kwargs):
         super().__init__(codebook_dim=codebook_dim, **kwargs)
         # Codebook-health settings (Fix A): EMA updates enable dead-code
         # resampling, and k-means init spreads the initial codes over the
@@ -490,7 +517,20 @@ class DualCodebookTokenizer(Tokenizer):
             kmeans_init=True,
             threshold_ema_dead_code=2,
         )
+        # Delta-reference mode: if "none" (default), small_vq quantises
+        # post-encoder features directly. If "anchor", small_vq quantises
+        # (feat_t - feat_0) so the input is "change from frame-0 anchor" by
+        # construction. If "rolling", small_vq quantises (feat_t - feat_{t-1})
+        # for instantaneous motion. The decoder still reconstructs the full
+        # frame by combining first_q with (rest_q + reference features) via
+        # its learned layers.
+        if delta_ref not in ("none", "anchor", "rolling"):
+            raise ValueError(
+                f"delta_ref must be one of 'none', 'anchor', 'rolling'; got {delta_ref!r}"
+            )
+        self.delta_ref = delta_ref
         self.config["small_codebook_size"] = small_codebook_size
+        self.config["delta_ref"] = delta_ref
 
     def encode_rest_features(self, videos):
         """Run the encoder path and return post-encoder pre-VQ features for

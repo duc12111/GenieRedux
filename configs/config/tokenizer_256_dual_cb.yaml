@@ -22,6 +22,7 @@ tokenizer:
   patch_size: 8
   codebook_size: 1024          # big VQ — must match the pretrained checkpoint
   small_codebook_size: 16      # overridden by CLI: tokenizer.small_codebook_size=CB_SIZE
+  delta_ref: "none"            # "none" / "anchor" / "rolling" — feature-delta reference for small VQ input
 
 train:
   dataset_root_dpath: "data_generation/datasets"
