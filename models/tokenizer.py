@@ -476,16 +476,52 @@ class DualCodebookTokenizer(Tokenizer):
 
     def __init__(self, *, small_codebook_size=16, codebook_dim=32, **kwargs):
         super().__init__(codebook_dim=codebook_dim, **kwargs)
+        # Codebook-health settings (Fix A): EMA updates enable dead-code
+        # resampling, and k-means init spreads the initial codes over the
+        # actual feature distribution. Together these prevent the collapse
+        # observed in run 1528367 where 95.6% of patches picked a single code.
         self.small_vq = VectorQuantize(
             dim=kwargs["dim"],
             codebook_size=small_codebook_size,
-            learnable_codebook=True,
-            ema_update=False,
+            codebook_dim=codebook_dim,
             use_cosine_sim=True,
             commitment_weight=0.25,
-            codebook_dim=codebook_dim,
+            ema_update=True,
+            kmeans_init=True,
+            threshold_ema_dead_code=2,
         )
         self.config["small_codebook_size"] = small_codebook_size
+
+    def encode_rest_features(self, videos):
+        """Run the encoder path and return post-encoder pre-VQ features for
+        frames 1+ only. Shape (B, T-1, h, w, d). Used by the invariance
+        auxiliary loss, which needs to compare encoded features for the
+        original and colour-jittered versions of the same window.
+        """
+        assert videos is not None and videos.ndim == 5
+        first_frame, rest_frames = videos[:, :, :1], videos[:, :, 1:]
+        first_frame_tokens = self.to_patch_emb_first_frame(first_frame)
+        rest_frames_tokens = self.to_patch_emb(rest_frames)
+        tokens = torch.cat((first_frame_tokens, rest_frames_tokens), dim=1)
+        tokens = self.encode(tokens)
+        return tokens[:, 1:, :, :, :]
+
+    def codebook_logits(self, features):
+        """Compute cosine-similarity logits against the small VQ codebook.
+
+        features: (..., d)  →  logits: (..., K).
+        Uses the same project_in + cosine-sim convention as the small_vq
+        forward pass. Differentiable through the codebook, not through the
+        encoder features (the encoder is frozen).
+        """
+        import torch.nn.functional as F
+        x = self.small_vq.project_in(features)
+        # Codebook stored in self.small_vq._codebook.embed, shape (1, K, d_cb)
+        codebook = self.small_vq._codebook.embed.squeeze(0)
+        x = F.normalize(x, dim=-1)
+        cb = F.normalize(codebook, dim=-1)
+        logits = x @ cb.T
+        return logits
 
     def freeze_big_components(self):
         """Freeze encoder, patch embeddings, spatial pos bias, and big VQ.

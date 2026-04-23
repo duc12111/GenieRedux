@@ -18,7 +18,7 @@ from data.data import (
 )
 from models.genie_redux import GenieRedux, GenieReduxGuided
 from models.lam import LatentActionModel
-from models.tokenizer import Tokenizer
+from models.tokenizer import DualCodebookTokenizer, Tokenizer
 from tools.logger import getLogger
 from training.evaluation import Evaluator
 from training.optimizer import LinearWarmup_CosineAnnealing, get_optimizer
@@ -28,6 +28,43 @@ log = getLogger(__name__)
 
 def exists(val):
     return val is not None
+
+
+_JITTER_PRESETS = {
+    "mild":   (0.10, 0.20, 0.20),
+    "medium": (0.30, 0.40, 0.50),
+    "strong": (0.50, 0.60, 0.80),
+}
+
+
+@torch.no_grad()
+def apply_window_jitter(videos: torch.Tensor, strength: str = "medium") -> torch.Tensor:
+    """Apply same random brightness/contrast/saturation to all frames of each window.
+
+    videos: (B, C, F, H, W) in [0, 1]. Returns same shape.
+    Per-window random factors (different across batch, identical across time),
+    to preserve motion structure while changing appearance. Used by the
+    appearance-invariance auxiliary loss (B1a).
+    """
+    if strength not in _JITTER_PRESETS:
+        raise ValueError(f"Unknown jitter strength: {strength}")
+    b_str, c_str, s_str = _JITTER_PRESETS[strength]
+    B = videos.shape[0]
+    dev = videos.device
+    def randf(lo, hi):
+        return torch.empty(B, 1, 1, 1, 1, device=dev).uniform_(lo, hi)
+    x = videos
+    # brightness
+    x = (x * randf(max(0.0, 1.0 - b_str), 1.0 + b_str)).clamp(0.0, 1.0)
+    # contrast around per-window mean
+    mean = x.mean(dim=(1, 2, 3, 4), keepdim=True)
+    x = ((x - mean) * randf(max(0.0, 1.0 - c_str), 1.0 + c_str) + mean).clamp(0.0, 1.0)
+    # saturation via NTSC luma mixing
+    luma_w = torch.tensor([0.2989, 0.5870, 0.1140], device=dev).view(1, 3, 1, 1, 1)
+    gray = (x * luma_w).sum(dim=1, keepdim=True)
+    sat = randf(max(0.0, 1.0 - s_str), 1.0 + s_str)
+    x = (x * sat + gray * (1.0 - sat)).clamp(0.0, 1.0)
+    return x
 
 
 def cycle(dl):
@@ -165,6 +202,13 @@ class Trainer(nn.Module):
         self.num_frames = num_frames
         self.sample_num_frames = sample_num_frames
         self.use_decoder_loss = getattr(train_config.train, "use_decoder_loss", False)
+
+        # Auxiliary motion-supervision weights for DualCodebookTokenizer
+        self.lambda_inv = float(getattr(train_config.train, "lambda_inv", 0.0))
+        self.lambda_flow = float(getattr(train_config.train, "lambda_flow", 0.0))
+        self.jitter_strength = str(getattr(train_config.train, "jitter_strength", "medium"))
+        self.inv_tau = float(getattr(train_config.train, "inv_tau", 1.0))
+        self.is_dual_cb = isinstance(model, DualCodebookTokenizer)
 
         # Create config dictionary for logging
         config = {}
@@ -466,6 +510,26 @@ class Trainer(nn.Module):
                         use_decoder_loss=self.use_decoder_loss,
                     )
 
+                    # Appearance-invariance auxiliary loss (B1a)
+                    # Only fires for DualCodebookTokenizer with lambda_inv > 0.
+                    # Forces small-VQ code assignments to be stable under
+                    # same-across-frames color jitter.
+                    if self.is_dual_cb and self.lambda_inv > 0:
+                        unwrapped = self.accelerator.unwrap_model(self.model)
+                        videos_jit = apply_window_jitter(videos, strength=self.jitter_strength)
+                        feat_orig = unwrapped.encode_rest_features(videos)
+                        feat_jit = unwrapped.encode_rest_features(videos_jit)
+                        logits_orig = unwrapped.codebook_logits(feat_orig) / self.inv_tau
+                        logits_jit = unwrapped.codebook_logits(feat_jit) / self.inv_tau
+                        target = logits_orig.argmax(dim=-1).detach()
+                        loss_inv = torch.nn.functional.cross_entropy(
+                            logits_jit.reshape(-1, logits_jit.shape[-1]),
+                            target.reshape(-1),
+                        )
+                        loss = loss + self.lambda_inv * loss_inv
+                        if step % self.wandb_log_every == 0:
+                            self.accelerator.log({"Train loss_inv": loss_inv.item()}, step=step)
+
                 # Backward pass
                 self.accelerator.backward(loss / self.grad_accum_every)
 
@@ -491,6 +555,29 @@ class Trainer(nn.Module):
         if step % self.wandb_log_every == 0:
             self.accelerator.log({"Train loss": total_loss.item()}, step=step)
             self.accelerator.log({"lr": self.optim.param_groups[0]["lr"]}, step=step)
+
+            # Codebook-health: perplexity, dead codes, active codes for the small VQ
+            if self.is_dual_cb:
+                unwrapped = self.accelerator.unwrap_model(self.model)
+                svq = unwrapped.small_vq
+                if getattr(svq, "ema_update", False):
+                    cluster_size = svq._codebook.cluster_size.detach()
+                    if cluster_size.ndim > 1:
+                        cluster_size = cluster_size[0]
+                    total = cluster_size.sum().clamp(min=1e-8)
+                    probs = cluster_size / total
+                    nz = probs[probs > 0]
+                    entropy = -(nz * nz.log()).sum().item() if nz.numel() > 0 else 0.0
+                    perplexity = float(torch.exp(torch.tensor(entropy)).item())
+                    threshold = float(getattr(svq, "threshold_ema_dead_code", 0))
+                    dead = int((cluster_size < threshold).sum().item())
+                    active = int((cluster_size > 0).sum().item())
+                    self.accelerator.log({
+                        "small_vq/perplexity": perplexity,
+                        "small_vq/dead_codes": dead,
+                        "small_vq/active_codes": active,
+                        "small_vq/entropy_nats": entropy,
+                    }, step=step)
 
         # Validation
         if not (step % self.validate_every):

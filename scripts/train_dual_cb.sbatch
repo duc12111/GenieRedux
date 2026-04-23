@@ -36,6 +36,8 @@ cd /home/stud/nguyenti/storage/user/GenieRedux
 CB_SIZE="${CB_SIZE:-16}"
 N_ENVS="${N_ENVS:-0}"            # 0 = all games (120 in retro_act_v0.0.0_g200_256)
 STEPS="${STEPS:-5000}"
+LAMBDA_INV="${LAMBDA_INV:-0}"    # appearance-invariance aux weight (B1a)
+LAMBDA_FLOW="${LAMBDA_FLOW:-0}"  # optical-flow aux weight (B1b, deferred)
 
 # Log-readable game-count tag: "all" when N_ENVS=0, else the number.
 if [ "${N_ENVS}" = "0" ]; then
@@ -51,10 +53,12 @@ python train_genie_redux.py \
   tokenizer.small_codebook_size="${CB_SIZE}" \
   train.n_envs="${N_ENVS}" \
   train.num_train_steps="${STEPS}" \
+  train.lambda_inv="${LAMBDA_INV}" \
+  train.lambda_flow="${LAMBDA_FLOW}" \
   train.sample_num_frames=7 \
   train.validate_every=500 \
   train.save_results_every=500 \
-  train.wandb_name="dual_cb_train_cb${CB_SIZE}_${GAMES_TAG}"
+  train.wandb_name="dual_cb_train_cb${CB_SIZE}_${GAMES_TAG}_inv${LAMBDA_INV}_flow${LAMBDA_FLOW}"
 
 # Logging cadence:
 #   - train scalars (loss, vq loss, recon loss, lr): every 50 steps (default)

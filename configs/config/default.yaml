@@ -32,6 +32,12 @@ train:
   validate_every: 1000
   save_model_every: 1000
   save_results_every: 1000
+  # Auxiliary motion-supervision weights for DualCodebookTokenizer. Zero by
+  # default; turn on per-run via sbatch override.
+  lambda_inv: 0.0          # appearance-invariance cross-entropy weight (B1a)
+  lambda_flow: 0.0          # optical-flow MSE weight (B1b, deferred)
+  jitter_strength: medium   # mild / medium / strong — used when lambda_inv > 0
+  inv_tau: 1.0              # softmax temperature for invariance logits
   resume_ckpt: "no"
   save_root_dpath: "./checkpoints"
   enable_cache: True
