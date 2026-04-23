@@ -140,6 +140,9 @@ def main():
     p.add_argument("--num-samples", type=int, default=60)
     p.add_argument("--batch-size", type=int, default=2)
     p.add_argument("--subsample", type=int, default=40000)
+    p.add_argument("--moving-only-threshold", type=float, default=0.0,
+                   help="if > 0, restrict the regression to patches where |flow| > threshold. "
+                        "Use 0.2 (patch units) to filter out static patches.")
     p.add_argument("--out", default="outputs/validation/v4_flow.txt")
     p.add_argument("--device", default="cuda" if torch.cuda.is_available() else "cpu")
     args = p.parse_args()
@@ -194,6 +197,23 @@ def main():
     pd_feat = np.concatenate(pd_all, axis=0).astype(np.float32)
     flow = np.concatenate(flow_all, axis=0).astype(np.float32)
     random_feat = rng.standard_normal(small_feat.shape).astype(np.float32)
+
+    # Optional: filter to moving patches only. Ridge R² on a (dx, dy) target
+    # dominated by static (0, 0) patches will report artificially low numbers
+    # across all features. Restricting to moving patches measures the real
+    # direction-prediction signal.
+    n_before = small_feat.shape[0]
+    if args.moving_only_threshold > 0:
+        flow_mag = np.linalg.norm(flow, axis=1)
+        keep_mask = flow_mag > args.moving_only_threshold
+        small_feat = small_feat[keep_mask]
+        big_feat = big_feat[keep_mask]
+        pd_feat = pd_feat[keep_mask]
+        random_feat = random_feat[keep_mask]
+        flow = flow[keep_mask]
+        n_after = small_feat.shape[0]
+        print(f"moving-only filter (|flow| > {args.moving_only_threshold}): "
+              f"{n_after}/{n_before} patches retained ({100.0*n_after/n_before:.1f}%)")
 
     N = small_feat.shape[0]
     if N > args.subsample:
