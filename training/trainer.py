@@ -556,27 +556,37 @@ class Trainer(nn.Module):
             self.accelerator.log({"Train loss": total_loss.item()}, step=step)
             self.accelerator.log({"lr": self.optim.param_groups[0]["lr"]}, step=step)
 
-            # Codebook-health: perplexity, dead codes, active codes for the small VQ
+            # Codebook-health: perplexity, dead codes, active codes for the small VQ.
+            # NB: in this repo's VectorQuantize, ema_update and cluster_size live on
+            # the inner _codebook (EuclideanCodebook / CosineSimCodebook), NOT the
+            # outer VectorQuantize wrapper. The outer wrapper has project_in/out only.
             if self.is_dual_cb:
                 unwrapped = self.accelerator.unwrap_model(self.model)
-                svq = unwrapped.small_vq
-                if getattr(svq, "ema_update", False):
-                    cluster_size = svq._codebook.cluster_size.detach()
-                    if cluster_size.ndim > 1:
-                        cluster_size = cluster_size[0]
-                    total = cluster_size.sum().clamp(min=1e-8)
-                    probs = cluster_size / total
+                svq = getattr(unwrapped, "small_vq", None)
+                inner = getattr(svq, "_codebook", None) if svq is not None else None
+                ema_update = bool(getattr(inner, "ema_update", False))
+                cluster_size = getattr(inner, "cluster_size", None) if inner is not None else None
+                if ema_update and cluster_size is not None:
+                    cs = cluster_size.detach().float()
+                    # cluster_size has shape (num_codebooks, K); typically (1, K)
+                    if cs.ndim > 1:
+                        cs = cs[0]
+                    total = cs.sum().clamp(min=1e-8)
+                    probs = cs / total
                     nz = probs[probs > 0]
-                    entropy = -(nz * nz.log()).sum().item() if nz.numel() > 0 else 0.0
-                    perplexity = float(torch.exp(torch.tensor(entropy)).item())
-                    threshold = float(getattr(svq, "threshold_ema_dead_code", 0))
-                    dead = int((cluster_size < threshold).sum().item())
-                    active = int((cluster_size > 0).sum().item())
+                    entropy_nats = float(-(nz * nz.log()).sum().item()) if nz.numel() > 0 else 0.0
+                    perplexity = float(torch.exp(torch.tensor(entropy_nats)).item())
+                    threshold = float(getattr(inner, "threshold_ema_dead_code", 0))
+                    dead = int((cs < threshold).sum().item())
+                    active = int((cs > 0).sum().item())
+                    max_val = float(cs.max().item())
+                    dominant_frac = float((max_val / total).item()) if total.item() > 0 else 0.0
                     self.accelerator.log({
                         "small_vq/perplexity": perplexity,
                         "small_vq/dead_codes": dead,
                         "small_vq/active_codes": active,
-                        "small_vq/entropy_nats": entropy,
+                        "small_vq/entropy_nats": entropy_nats,
+                        "small_vq/dominant_code_frac": dominant_frac,
                     }, step=step)
 
         # Validation
