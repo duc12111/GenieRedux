@@ -28,9 +28,10 @@ cd /home/stud/nguyenti/storage/user/GenieRedux
 
 CKPT="${CKPT:-checkpoints/tokenizer_dual_cb/dual_cb_train_cb64_allgames_inv0_flow0_deltanone/model-5000.pt}"
 OUT_DIR="${OUT_DIR:-outputs/validation/R4_cb64}"
-NUM_SAMPLES="${NUM_SAMPLES:-400}"
+NUM_SAMPLES="${NUM_SAMPLES:-3000}"
 CB_SIZE="${CB_SIZE:-64}"
 DELTA_REF="${DELTA_REF:-none}"
+SEQ_STEP="${SEQ_STEP:-5}"
 
 mkdir -p "$OUT_DIR"
 
@@ -46,6 +47,7 @@ python scripts/test_c_action_probe.py \
   --small-codebook-size "$CB_SIZE" \
   --delta-ref "$DELTA_REF" \
   --num-samples "$NUM_SAMPLES" \
+  --seq-step "$SEQ_STEP" \
   --batch-size 4 \
   --out "$OUT_DIR/test_c_action_probe.txt"
 

@@ -155,6 +155,8 @@ def main():
     p.add_argument("--control-csv",
                    default="data_generation/annotations/RetroAct_v0.1_control_GenieRedux-G-50_sublist.csv")
     p.add_argument("--num-samples", type=int, default=400)
+    p.add_argument("--seq-step", type=int, default=20,
+                   help="stride between sampled windows within a session; lower = more windows per session")
     p.add_argument("--batch-size", type=int, default=2)
     p.add_argument("--out", default="outputs/validation/test_c_action_probe.txt")
     p.add_argument("--device", default="cuda" if torch.cuda.is_available() else "cpu")
@@ -183,7 +185,7 @@ def main():
     ds = MultiEnvironmentDataset(
         f"{args.dataset_root_dpath}/{args.dataset_name}",
         seq_length_input=args.num_frames - 1,
-        seq_step=20,
+        seq_step=args.seq_step,
         split_type="session", split="validation",
         transform=transforms["train"],
         format=DatasetOutputFormat.IVG,
