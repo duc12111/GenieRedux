@@ -62,8 +62,13 @@ def load_control_whitelist(csv_path: str) -> list[str]:
 
 
 @torch.no_grad()
-def extract_feature_histograms(model, videos, actions):
+def extract_feature_histograms(model, videos, actions, spatial_grid=4):
     """Per-window features + action label.
+
+    Produces two families of features:
+    - histograms: whole-window bag-of-codes, throws away spatial info
+    - spatial: pooled code-embedding grids of shape (spatial_grid, spatial_grid),
+      preserves WHERE on screen each code is firing
 
     Returns dict of feature arrays (batch_dim, feat_dim) and labels (batch_dim,).
     """
@@ -94,49 +99,76 @@ def extract_feature_histograms(model, videos, actions):
     rest_flat, ps_rest = pack([rest_enc], "b * d")
     _, rest_idx, _ = model.small_vq(rest_flat)
 
-    small_idx = rest_idx.reshape(B, T - 1, h, w).cpu().numpy()
-    big_idx = first_idx.reshape(B, 1, h, w).cpu().numpy()
+    small_idx = rest_idx.reshape(B, T - 1, h, w)     # torch, kept for code-embedding lookup
+    big_idx = first_idx.reshape(B, 1, h, w)
+    small_idx_np = small_idx.cpu().numpy()
+    big_idx_np = big_idx.cpu().numpy()
 
-    # small_vq histogram per window
+    # Lookup code embeddings for spatial features (preserves "where")
+    small_cb = model.small_vq._codebook.embed.squeeze(0)     # (K_small, d_cb)
+    big_cb = model.vq._codebook.embed.squeeze(0)             # (K_big, d_cb)
+    small_embs = small_cb[small_idx]                          # (B, T-1, h, w, d_cb)
+    big_embs = big_cb[big_idx]                                # (B, 1, h, w, d_cb)
+
+    # ---- histogram features (bag-of-codes, no spatial info) ----
     small_hist = np.zeros((B, K_small), dtype=np.float32)
     for b in range(B):
-        counts = np.bincount(small_idx[b].reshape(-1), minlength=K_small)
+        counts = np.bincount(small_idx_np[b].reshape(-1), minlength=K_small)
         small_hist[b] = counts / counts.sum()
-
-    # big_vq histogram per window
     big_hist = np.zeros((B, K_big), dtype=np.float32)
     for b in range(B):
-        counts = np.bincount(big_idx[b].reshape(-1), minlength=K_big)
+        counts = np.bincount(big_idx_np[b].reshape(-1), minlength=K_big)
         big_hist[b] = counts / counts.sum()
 
-    # Encoder features: mean-pool over (T-1, h, w) → (B, d). Use pre-delta features.
+    # Encoder features: mean-pool over (T-1, h, w) → (B, d) for histogram variant
     encoder_feat = encoded[:, 1:].mean(dim=(1, 2, 3)).cpu().numpy()  # (B, d)
 
     # Pixel-delta: per-channel mean |Δpixel| over (T-1, patch H, patch W) → (B, C)
     vid_patch = videos.reshape(B, C, T, h, ph, w, pw)
-    diffs = (vid_patch[:, :, 1:] - vid_patch[:, :, :-1]).abs()  # (B, C, T-1, h, ph, w, pw)
+    diffs = (vid_patch[:, :, 1:] - vid_patch[:, :, :-1]).abs()
     pixel_delta = diffs.mean(dim=(2, 3, 4, 5, 6)).cpu().numpy()  # (B, C)
 
+    # ---- spatial features ((spatial_grid, spatial_grid) pooling) ----
+    # Temporal-mean then spatial-adaptive-pool to (G, G) then flatten.
+    # Small VQ embedding: (B, T-1, h, w, d_cb) → avg T → (B, h, w, d_cb) → (G,G) pool → flatten
+    def pool_to_grid(x_bhwd):
+        # x_bhwd: (B, h, w, d)
+        B_, h_, w_, d_ = x_bhwd.shape
+        x = x_bhwd.permute(0, 3, 1, 2)                        # (B, d, h, w)
+        x = torch.nn.functional.adaptive_avg_pool2d(x, (spatial_grid, spatial_grid))
+        x = x.permute(0, 2, 3, 1).reshape(B_, -1)             # (B, G*G*d)
+        return x
+
+    small_spatial = pool_to_grid(small_embs.mean(dim=1)).cpu().numpy()      # (B, G*G*d_cb)
+    big_spatial = pool_to_grid(big_embs.squeeze(1)).cpu().numpy()           # (B, G*G*d_cb)
+    encoder_spatial = pool_to_grid(encoded[:, 1:].mean(dim=1)).cpu().numpy()  # (B, G*G*d)
+    # pixel_delta spatial: per-channel mean |Δpixel| per patch, then pool
+    pixel_delta_patch = diffs.mean(dim=(2, 4, 6))    # (B, C, h, w) — mean over T-1, ph, pw
+    # (B, C, h, w) → permute to (B, h, w, C) for pool_to_grid
+    pixel_delta_spatial = pool_to_grid(pixel_delta_patch.permute(0, 2, 3, 1)).cpu().numpy()  # (B, G*G*C)
+
     # Action target: actions shape (B, T, num_classes) one-hot
-    # Majority vote across motion frames (excluding frame 0)
-    # actions is torch.Tensor coming from batch
     if actions is not None:
-        a = actions.cpu().numpy()  # could be (B, T, C) or (B, T)
+        a = actions.cpu().numpy()
         if a.ndim == 3:
-            # one-hot or multi-hot: take argmax per frame, majority across motion frames
-            per_frame = a[:, 1:].argmax(axis=-1)  # (B, T-1)
+            per_frame = a[:, 1:].argmax(axis=-1)
         else:
             per_frame = a[:, 1:]
-        # Majority
         labels = np.array([np.bincount(per_frame[b]).argmax() for b in range(B)])
     else:
         labels = np.zeros(B, dtype=np.int64)
 
     return {
+        # histogram features (lossy — no spatial or temporal)
         "small_vq": small_hist,
         "big_vq": big_hist,
         "encoder": encoder_feat,
         "pixel_delta": pixel_delta,
+        # spatial features (preserves "where")
+        "small_vq_spatial": small_spatial,
+        "big_vq_spatial": big_spatial,
+        "encoder_spatial": encoder_spatial,
+        "pixel_delta_spatial": pixel_delta_spatial,
         "labels": labels,
     }
 
@@ -198,7 +230,9 @@ def main():
     ds = Subset(ds, range(min(args.num_samples, len(ds))))
     dl = DataLoader(ds, batch_size=args.batch_size, shuffle=False, num_workers=2)
 
-    features = {k: [] for k in ["small_vq", "big_vq", "encoder", "pixel_delta"]}
+    feat_keys = ["small_vq", "big_vq", "encoder", "pixel_delta",
+                 "small_vq_spatial", "big_vq_spatial", "encoder_spatial", "pixel_delta_spatial"]
+    features = {k: [] for k in feat_keys}
     labels_all = []
     n_batches = 0
     with torch.no_grad():
@@ -216,9 +250,14 @@ def main():
     features = {k: np.concatenate(v, axis=0) for k, v in features.items()}
     labels = np.concatenate(labels_all)
     print(f"extracted {len(labels)} windows, {n_batches} batches")
+    for k, v in features.items():
+        print(f"  {k:<22} shape: {v.shape}")
 
-    # Random feature baseline
+    # Random feature baselines at matched dims (hist and spatial)
     features["random"] = rng.standard_normal((len(labels), features["small_vq"].shape[1])).astype(np.float32)
+    features["random_spatial"] = rng.standard_normal(
+        (len(labels), features["small_vq_spatial"].shape[1])
+    ).astype(np.float32)
 
     # Analyse label distribution
     n_classes = len(np.unique(labels))
@@ -242,37 +281,55 @@ def main():
         bal = balanced_accuracy_score(y_te, y_pred)
         results[name] = {"acc": float(acc), "bal_acc": float(bal)}
 
-    # Pass criterion
-    small_acc = results["small_vq"]["acc"]
-    big_acc = results["big_vq"]["acc"]
-    random_acc = results["random"]["acc"]
-    pass_chance = small_acc >= 2 * uniform_chance
-    pass_vs_big = big_acc > 0 and small_acc >= 1.3 * big_acc
-    pass_gate = pass_chance and pass_vs_big
+    # Pass criterion — for spatial features (the real test)
+    small_sp_acc = results["small_vq_spatial"]["acc"]
+    big_sp_acc = results["big_vq_spatial"]["acc"]
+    pass_sp_chance = small_sp_acc >= 2 * uniform_chance
+    pass_sp_vs_big = big_sp_acc > 0 and small_sp_acc >= 1.3 * big_sp_acc
+    pass_gate_spatial = pass_sp_chance and pass_sp_vs_big
+
+    # Compare to histogram version too
+    small_hist_acc = results["small_vq"]["acc"]
+    big_hist_acc = results["big_vq"]["acc"]
 
     # Write results
     lines = []
-    lines.append("=== Test C: action probe on labelled subset ===")
+    lines.append("=== Test C (v2, spatial): action probe on labelled subset ===")
     lines.append(f"checkpoint                : {args.checkpoint}")
     lines.append(f"control whitelist games   : {len(whitelist)}")
     lines.append(f"extracted windows         : {len(labels)}")
     lines.append(f"action classes observed   : {n_classes}")
     lines.append(f"uniform chance            : {uniform_chance:.3f}")
     lines.append(f"majority-class baseline   : {chance:.3f}")
-    lines.append(f"label distribution (top 10): {dict(zip(*np.unique(labels, return_counts=True)))}")
+    lines.append(f"label distribution        : {dict(zip(*np.unique(labels, return_counts=True)))}")
     lines.append("")
-    lines.append(f"{'feature':<14}{'accuracy':>12}{'balanced acc':>16}{'ratio vs big_vq':>18}")
-    lines.append("-" * 60)
+    lines.append("--- Histogram features (bag-of-codes, no spatial info) ---")
+    lines.append(f"{'feature':<22}{'accuracy':>12}{'balanced acc':>16}{'ratio vs big_vq':>18}")
+    lines.append("-" * 68)
     for name in ["small_vq", "big_vq", "encoder", "pixel_delta", "random"]:
         r = results[name]
-        ratio = (r["acc"] / big_acc) if big_acc > 0 else 0.0
-        lines.append(f"{name:<14}{r['acc']:>12.4f}{r['bal_acc']:>16.4f}{ratio:>18.2f}×")
+        ratio = (r["acc"] / big_hist_acc) if big_hist_acc > 0 else 0.0
+        lines.append(f"{name:<22}{r['acc']:>12.4f}{r['bal_acc']:>16.4f}{ratio:>18.2f}×")
     lines.append("")
-    lines.append("Pass criteria:")
-    lines.append(f"  small_vq ≥ 2 × uniform chance ({2 * uniform_chance:.3f}) : {'YES' if pass_chance else 'NO'}  (got {small_acc:.3f})")
-    lines.append(f"  small_vq ≥ 1.3 × big_vq accuracy                        : {'YES' if pass_vs_big else 'NO'}  (got {small_acc / max(big_acc, 1e-9):.2f}×)")
+    lines.append("--- Spatial features (4×4 grid pooling, preserves 'where') ---")
+    lines.append(f"{'feature':<22}{'accuracy':>12}{'balanced acc':>16}{'ratio vs big_vq':>18}")
+    lines.append("-" * 68)
+    for name in ["small_vq_spatial", "big_vq_spatial", "encoder_spatial", "pixel_delta_spatial", "random_spatial"]:
+        r = results[name]
+        ratio = (r["acc"] / big_sp_acc) if big_sp_acc > 0 else 0.0
+        lines.append(f"{name:<22}{r['acc']:>12.4f}{r['bal_acc']:>16.4f}{ratio:>18.2f}×")
     lines.append("")
-    lines.append(f"PASS GATE                                                : {'YES' if pass_gate else 'NO'}")
+    lines.append(f"Spatial vs histogram improvement:")
+    lines.append(f"  small_vq: {small_hist_acc:.3f} (hist) → {small_sp_acc:.3f} (spatial)  Δ={small_sp_acc - small_hist_acc:+.3f}")
+    lines.append(f"  big_vq  : {big_hist_acc:.3f} (hist) → {big_sp_acc:.3f} (spatial)  Δ={big_sp_acc - big_hist_acc:+.3f}")
+    lines.append("")
+    lines.append("Pass criteria (applied to SPATIAL features):")
+    lines.append(f"  small_vq_spatial ≥ 2 × uniform chance ({2 * uniform_chance:.3f}) : {'YES' if pass_sp_chance else 'NO'}  (got {small_sp_acc:.3f})")
+    lines.append(f"  small_vq_spatial ≥ 1.3 × big_vq_spatial accuracy                : {'YES' if pass_sp_vs_big else 'NO'}  (got {small_sp_acc / max(big_sp_acc, 1e-9):.2f}×)")
+    lines.append("")
+    lines.append(f"PASS GATE (spatial)                                              : {'YES' if pass_gate_spatial else 'NO'}")
+    # Keep histogram-version pass_gate for backward compat logging
+    pass_gate = pass_gate_spatial
 
     out_path = Path(args.out)
     out_path.parent.mkdir(parents=True, exist_ok=True)
