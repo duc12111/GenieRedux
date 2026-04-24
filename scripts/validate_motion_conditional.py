@@ -89,6 +89,9 @@ def main():
     p.add_argument("--batch-size", type=int, default=2)
     p.add_argument("--motion-threshold", type=float, default=0.2,
                    help="|flow| threshold (in patch units) to classify a patch as moving")
+    p.add_argument("--delta-ref", default="none",
+                   choices=["none", "anchor", "rolling"],
+                   help="if the checkpoint was trained with delta_ref != 'none', pass the same value here")
     p.add_argument("--out", default="outputs/validation/motion_conditional.txt")
     p.add_argument("--device", default="cuda" if torch.cuda.is_available() else "cpu")
     args = p.parse_args()
@@ -102,6 +105,7 @@ def main():
         image_size=args.image_size,
         patch_size=args.patch_size,
         num_blocks=8, dim_head=64, heads=8, ff_mult=4,
+        delta_ref=args.delta_ref,
     )
     sd = torch.load(args.checkpoint, map_location="cpu")["model"]
     model.load_state_dict(sd, strict=False)
